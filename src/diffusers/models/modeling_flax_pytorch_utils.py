@@ -43,6 +43,23 @@ def rename_key(key):
 def rename_key_and_reshape_tensor(pt_tuple_key, pt_tensor, random_flax_state_dict):
     """Rename PT weight names to corresponding Flax weight names and reshape tensor if necessary"""
 
+    # rename attention layers
+    if len(pt_tuple_key) > 1:
+        for rename_from, rename_to in (
+            ("to_out_0", "proj_attn"),
+            ("to_k", "key"),
+            ("to_v", "value"),
+            ("to_q", "query"),
+        ):
+            if pt_tuple_key[-2] == rename_from:
+                weight_name = pt_tuple_key[-1]
+                weight_name = "kernel" if weight_name == "weight" else weight_name
+                renamed_pt_tuple_key = pt_tuple_key[:-2] + (rename_to, weight_name)
+                if renamed_pt_tuple_key in random_flax_state_dict:
+                    logger.info(f'Renaming {pt_tuple_key} to {renamed_pt_tuple_key}')
+                    assert random_flax_state_dict[renamed_pt_tuple_key].shape == pt_tensor.T.shape
+                    return renamed_pt_tuple_key, pt_tensor.T
+
     # conv norm or layer norm
     renamed_pt_tuple_key = pt_tuple_key[:-1] + ("scale",)
     if (
