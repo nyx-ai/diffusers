@@ -18,6 +18,8 @@ import math
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+from aqt.jax.v2.flax import aqt_flax
+from aqt.jax.v2 import config as aqt_config
 
 
 def _query_chunk_attention(query, key, value, precision, key_chunk_size: int = 4096):
@@ -145,17 +147,28 @@ class FlaxAttention(nn.Module):
     use_memory_efficient_attention: bool = False
     split_head_dim: bool = False
     dtype: jnp.dtype = jnp.float32
+    do_quant: bool = False
+    quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
+    aqt_cfg: aqt_config.DotGeneral = aqt_config.fully_quantized(fwd_bits=8, bwd_bits=8)
 
     def setup(self):
+        dot_general_cls = None
+        if self.do_quant:
+            dot_general_cls = functools.partial(
+                    aqt_flax.AqtDotGeneral,
+                    self.aqt_cfg,
+                    # In nn.Dense, it is RHS that has the kernel.
+                    rhs_quant_mode=self.quant_mode)
+
         inner_dim = self.dim_head * self.heads
         self.scale = self.dim_head**-0.5
 
         # Weights were exported with old names {to_q, to_k, to_v, to_out}
-        self.query = nn.Dense(inner_dim, use_bias=False, dtype=self.dtype, name="to_q")
-        self.key = nn.Dense(inner_dim, use_bias=False, dtype=self.dtype, name="to_k")
-        self.value = nn.Dense(inner_dim, use_bias=False, dtype=self.dtype, name="to_v")
+        self.query = nn.Dense(inner_dim, dot_general_cls=dot_general_cls, use_bias=False, dtype=self.dtype, name="to_q")
+        self.key = nn.Dense(inner_dim, dot_general_cls=dot_general_cls, use_bias=False, dtype=self.dtype, name="to_k")
+        self.value = nn.Dense(inner_dim, dot_general_cls=dot_general_cls, use_bias=False, dtype=self.dtype, name="to_v")
 
-        self.proj_attn = nn.Dense(self.query_dim, dtype=self.dtype, name="to_out_0")
+        self.proj_attn = nn.Dense(self.query_dim, dot_general_cls=dot_general_cls, dtype=self.dtype, name="to_out_0")
         self.dropout_layer = nn.Dropout(rate=self.dropout)
 
     def reshape_heads_to_batch_dim(self, tensor):
@@ -270,6 +283,7 @@ class FlaxBasicTransformerBlock(nn.Module):
     dtype: jnp.dtype = jnp.float32
     use_memory_efficient_attention: bool = False
     split_head_dim: bool = False
+    do_quant: bool = False
 
     def setup(self):
         # self attention (or cross_attention if only_cross_attention is True)
@@ -281,6 +295,7 @@ class FlaxBasicTransformerBlock(nn.Module):
             self.use_memory_efficient_attention,
             self.split_head_dim,
             dtype=self.dtype,
+            do_quant=self.do_quant,
         )
         # cross attention
         self.attn2 = FlaxAttention(
@@ -291,8 +306,9 @@ class FlaxBasicTransformerBlock(nn.Module):
             self.use_memory_efficient_attention,
             self.split_head_dim,
             dtype=self.dtype,
+            do_quant=self.do_quant,
         )
-        self.ff = FlaxFeedForward(dim=self.dim, dropout=self.dropout, dtype=self.dtype)
+        self.ff = FlaxFeedForward(dim=self.dim, dropout=self.dropout, dtype=self.dtype, do_quant=self.do_quant)
         self.norm1 = nn.LayerNorm(epsilon=1e-5, dtype=self.dtype)
         self.norm2 = nn.LayerNorm(epsilon=1e-5, dtype=self.dtype)
         self.norm3 = nn.LayerNorm(epsilon=1e-5, dtype=self.dtype)
@@ -357,6 +373,7 @@ class FlaxTransformer2DModel(nn.Module):
     dtype: jnp.dtype = jnp.float32
     use_memory_efficient_attention: bool = False
     split_head_dim: bool = False
+    do_quant: bool = False
 
     def setup(self):
         self.norm = nn.GroupNorm(num_groups=32, epsilon=1e-5)
@@ -383,6 +400,7 @@ class FlaxTransformer2DModel(nn.Module):
                 dtype=self.dtype,
                 use_memory_efficient_attention=self.use_memory_efficient_attention,
                 split_head_dim=self.split_head_dim,
+                do_quant=self.do_quant
             )
             for _ in range(self.depth)
         ]
@@ -445,12 +463,23 @@ class FlaxFeedForward(nn.Module):
     dim: int
     dropout: float = 0.0
     dtype: jnp.dtype = jnp.float32
+    do_quant: bool = False
+    quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
+    aqt_cfg: aqt_config.DotGeneral = aqt_config.fully_quantized(fwd_bits=8, bwd_bits=8)
 
     def setup(self):
+        dot_general_cls = None
+        if self.do_quant:
+            dot_general_cls = functools.partial(
+                    aqt_flax.AqtDotGeneral,
+                    self.aqt_cfg,
+                    # In nn.Dense, it is RHS that has the kernel.
+                    rhs_quant_mode=self.quant_mode)
+
         # The second linear layer needs to be called
         # net_2 for now to match the index of the Sequential layer
         self.net_0 = FlaxGEGLU(self.dim, self.dropout, self.dtype)
-        self.net_2 = nn.Dense(self.dim, dtype=self.dtype)
+        self.net_2 = nn.Dense(self.dim, dot_general_cls=dot_general_cls, dtype=self.dtype)
 
     def __call__(self, hidden_states, deterministic=True):
         hidden_states = self.net_0(hidden_states, deterministic=deterministic)

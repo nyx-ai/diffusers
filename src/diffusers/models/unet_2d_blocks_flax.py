@@ -57,6 +57,7 @@ class FlaxCrossAttnDownBlock2D(nn.Module):
     split_head_dim: bool = False
     dtype: jnp.dtype = jnp.float32
     transformer_layers_per_block: int = 1
+    do_quant: bool = False
 
     def setup(self):
         resnets = []
@@ -83,6 +84,7 @@ class FlaxCrossAttnDownBlock2D(nn.Module):
                 use_memory_efficient_attention=self.use_memory_efficient_attention,
                 split_head_dim=self.split_head_dim,
                 dtype=self.dtype,
+                do_quant=self.do_quant,
             )
             attentions.append(attn_block)
 
@@ -131,6 +133,7 @@ class FlaxDownBlock2D(nn.Module):
     num_layers: int = 1
     add_downsample: bool = True
     dtype: jnp.dtype = jnp.float32
+    do_quant: bool = False
 
     def setup(self):
         resnets = []
@@ -203,6 +206,7 @@ class FlaxCrossAttnUpBlock2D(nn.Module):
     split_head_dim: bool = False
     dtype: jnp.dtype = jnp.float32
     transformer_layers_per_block: int = 1
+    do_quant: bool = False
 
     def setup(self):
         resnets = []
@@ -230,6 +234,7 @@ class FlaxCrossAttnUpBlock2D(nn.Module):
                 use_memory_efficient_attention=self.use_memory_efficient_attention,
                 split_head_dim=self.split_head_dim,
                 dtype=self.dtype,
+                do_quant=self.do_quant,
             )
             attentions.append(attn_block)
 
@@ -282,6 +287,7 @@ class FlaxUpBlock2D(nn.Module):
     num_layers: int = 1
     add_upsample: bool = True
     dtype: jnp.dtype = jnp.float32
+    do_quant: bool = False
 
     def setup(self):
         resnets = []
@@ -348,6 +354,7 @@ class FlaxUNetMidBlock2DCrossAttn(nn.Module):
     split_head_dim: bool = False
     dtype: jnp.dtype = jnp.float32
     transformer_layers_per_block: int = 1
+    do_quant: bool = False
 
     def setup(self):
         # there is always at least one resnet
@@ -372,6 +379,7 @@ class FlaxUNetMidBlock2DCrossAttn(nn.Module):
                 use_memory_efficient_attention=self.use_memory_efficient_attention,
                 split_head_dim=self.split_head_dim,
                 dtype=self.dtype,
+                do_quant=self.do_quant,
             )
             attentions.append(attn_block)
 

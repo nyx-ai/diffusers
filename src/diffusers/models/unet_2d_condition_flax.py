@@ -18,6 +18,7 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
+from aqt.jax.v2.flax import aqt_flax
 
 from ..configuration_utils import ConfigMixin, flax_register_to_config
 from ..utils import BaseOutput
@@ -125,6 +126,8 @@ class FlaxUNet2DConditionModel(nn.Module, FlaxModelMixin, ConfigMixin):
     addition_time_embed_dim: Optional[int] = None
     addition_embed_type_num_heads: int = 64
     projection_class_embeddings_input_dim: Optional[int] = None
+    do_quant: bool = False
+    quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
 
     def init_weights(self, rng: jax.Array) -> FrozenDict:
         # init input tensors
@@ -237,6 +240,7 @@ class FlaxUNet2DConditionModel(nn.Module, FlaxModelMixin, ConfigMixin):
                     use_memory_efficient_attention=self.use_memory_efficient_attention,
                     split_head_dim=self.split_head_dim,
                     dtype=self.dtype,
+                    do_quant=self.do_quant
                 )
             else:
                 down_block = FlaxDownBlock2D(
@@ -246,6 +250,7 @@ class FlaxUNet2DConditionModel(nn.Module, FlaxModelMixin, ConfigMixin):
                     num_layers=self.layers_per_block,
                     add_downsample=not is_final_block,
                     dtype=self.dtype,
+                    do_quant=self.do_quant,
                 )
 
             down_blocks.append(down_block)
@@ -261,6 +266,7 @@ class FlaxUNet2DConditionModel(nn.Module, FlaxModelMixin, ConfigMixin):
             use_memory_efficient_attention=self.use_memory_efficient_attention,
             split_head_dim=self.split_head_dim,
             dtype=self.dtype,
+            do_quant=self.do_quant,
         )
 
         # up
@@ -292,6 +298,7 @@ class FlaxUNet2DConditionModel(nn.Module, FlaxModelMixin, ConfigMixin):
                     use_memory_efficient_attention=self.use_memory_efficient_attention,
                     split_head_dim=self.split_head_dim,
                     dtype=self.dtype,
+                    do_quant=self.do_quant,
                 )
             else:
                 up_block = FlaxUpBlock2D(
@@ -302,6 +309,7 @@ class FlaxUNet2DConditionModel(nn.Module, FlaxModelMixin, ConfigMixin):
                     add_upsample=not is_final_block,
                     dropout=self.dropout,
                     dtype=self.dtype,
+                    do_quant=self.do_quant,
                 )
 
             up_blocks.append(up_block)
