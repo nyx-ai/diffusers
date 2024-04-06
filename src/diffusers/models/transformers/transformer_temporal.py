@@ -326,6 +326,7 @@ class TransformerSpatioTemporalModel(nn.Module):
         num_frames_emb = torch.arange(num_frames, device=hidden_states.device)
         num_frames_emb = num_frames_emb.repeat(batch_size, 1)
         num_frames_emb = num_frames_emb.reshape(-1)
+        # num_frames_emb shape (14,)
         t_emb = self.time_proj(num_frames_emb)
 
         # `Timesteps` does not contain any weights and will always return f32 tensors
@@ -333,8 +334,10 @@ class TransformerSpatioTemporalModel(nn.Module):
         # there might be better ways to encapsulate this.
         t_emb = t_emb.to(dtype=hidden_states.dtype)
 
+        # t_emb shape (14, 320)
         emb = self.time_pos_embed(t_emb)
         emb = emb[:, None, :]
+        # emb shape (14, 1, 320)
 
         # 2. Blocks
         for block, temporal_block in zip(self.transformer_blocks, self.temporal_transformer_blocks):

@@ -75,29 +75,44 @@ def rename_key_and_reshape_tensor(pt_tuple_key, pt_tensor, random_flax_state_dic
 
     # embedding
     if pt_tuple_key[-1] == "weight" and pt_tuple_key[:-1] + ("embedding",) in random_flax_state_dict:
+        print(f'Assuming layer {pt_tuple_key} to be a embedding layer')
         pt_tuple_key = pt_tuple_key[:-1] + ("embedding",)
         return renamed_pt_tuple_key, pt_tensor
 
     # conv layer
     renamed_pt_tuple_key = pt_tuple_key[:-1] + ("kernel",)
     if pt_tuple_key[-1] == "weight" and pt_tensor.ndim == 4:
+        print(f'Assuming layer {pt_tuple_key} to be a Conv2D layer')
+        old_shape = pt_tensor.shape
         pt_tensor = pt_tensor.transpose(2, 3, 1, 0)
+        new_shape = pt_tensor.shape
+        print(f'Converted PyTorch weight from {old_shape} to {new_shape}')
+        return renamed_pt_tuple_key, pt_tensor
+    elif pt_tuple_key[-1] == "weight" and pt_tensor.ndim == 5:
+        print(f'Assuming layer {pt_tuple_key} to be a Conv3D layer')
+        old_shape = pt_tensor.shape
+        pt_tensor = pt_tensor.transpose(2, 3, 4, 0, 1)
+        new_shape = pt_tensor.shape
+        print(f'Converted PyTorch weight from {old_shape} to {new_shape}')
         return renamed_pt_tuple_key, pt_tensor
 
     # linear layer
     renamed_pt_tuple_key = pt_tuple_key[:-1] + ("kernel",)
     if pt_tuple_key[-1] == "weight":
+        print(f'Assuming layer {pt_tuple_key} to be a linear layer')
         pt_tensor = pt_tensor.T
         return renamed_pt_tuple_key, pt_tensor
 
     # old PyTorch layer norm weight
     renamed_pt_tuple_key = pt_tuple_key[:-1] + ("weight",)
     if pt_tuple_key[-1] == "gamma":
+        print(f'Assuming layer {pt_tuple_key} to be an old layer norm')
         return renamed_pt_tuple_key, pt_tensor
 
     # old PyTorch layer norm bias
     renamed_pt_tuple_key = pt_tuple_key[:-1] + ("bias",)
     if pt_tuple_key[-1] == "beta":
+        print(f'Assuming layer {pt_tuple_key} to be an old layer norm bias')
         return renamed_pt_tuple_key, pt_tensor
 
     return pt_tuple_key, pt_tensor
