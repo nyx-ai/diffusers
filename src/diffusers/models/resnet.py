@@ -612,26 +612,37 @@ class TemporalResnetBlock(nn.Module):
 
     def forward(self, input_tensor: torch.FloatTensor, temb: torch.FloatTensor) -> torch.FloatTensor:
         hidden_states = input_tensor
+        save_dir ='/home/martin/stable-diffusion-jax/comp_layers/pt'
+        torch.save(input_tensor, f'{save_dir}/temp_resnet_input')
 
         hidden_states = self.norm1(hidden_states)
+        torch.save(hidden_states, f'{save_dir}/temp_resnet_after_norm1')
         hidden_states = self.nonlinearity(hidden_states)
+        torch.save(hidden_states, f'{save_dir}/temp_resnet_after_act')
         hidden_states = self.conv1(hidden_states)
+        torch.save(hidden_states, f'{save_dir}/temp_resnet_after_conv1')
 
         if self.time_emb_proj is not None:
             temb = self.nonlinearity(temb)
             temb = self.time_emb_proj(temb)[:, :, :, None, None]
             temb = temb.permute(0, 2, 1, 3, 4)
             hidden_states = hidden_states + temb
+        torch.save(hidden_states, f'{save_dir}/temp_resnet_after_temb')
 
         hidden_states = self.norm2(hidden_states)
+        torch.save(input_tensor, f'{save_dir}/temp_resnet_after_norm2')
         hidden_states = self.nonlinearity(hidden_states)
+        torch.save(input_tensor, f'{save_dir}/temp_resnet_after_activation')
         hidden_states = self.dropout(hidden_states)
+        torch.save(input_tensor, f'{save_dir}/temp_resnet_after_dropout')
         hidden_states = self.conv2(hidden_states)
+        torch.save(hidden_states, f'{save_dir}/temp_resnet_after_conv2')
 
         if self.conv_shortcut is not None:
             input_tensor = self.conv_shortcut(input_tensor)
 
         output_tensor = input_tensor + hidden_states
+        torch.save(hidden_states, f'{save_dir}/temp_resnet_final')
 
         return output_tensor
 
@@ -694,8 +705,12 @@ class SpatioTemporalResBlock(nn.Module):
         temb: Optional[torch.FloatTensor] = None,
         image_only_indicator: Optional[torch.Tensor] = None,
     ):
+        save_dir ='/home/martin/stable-diffusion-jax/comp_layers/pt'
+        torch.save(hidden_states, f'{save_dir}/resnet_input')
+        torch.save(temb, f'{save_dir}/resnet_temb')
         num_frames = image_only_indicator.shape[-1]
         hidden_states = self.spatial_res_block(hidden_states, temb)
+        torch.save(hidden_states, f'{save_dir}/resnet_after_spatial')
 
         batch_frames, channels, height, width = hidden_states.shape
         batch_size = batch_frames // num_frames
@@ -711,11 +726,14 @@ class SpatioTemporalResBlock(nn.Module):
             temb = temb.reshape(batch_size, num_frames, -1)
 
         hidden_states = self.temporal_res_block(hidden_states, temb)
+        torch.save(hidden_states, f'{save_dir}/resnet_after_temp')
         hidden_states = self.time_mixer(
             x_spatial=hidden_states_mix,
             x_temporal=hidden_states,
             image_only_indicator=image_only_indicator,
         )
+        torch.save(hidden_states, f'{save_dir}/resnet_after_mixer')
+        # raise Exception('done pt')
 
         hidden_states = hidden_states.permute(0, 2, 1, 3, 4).reshape(batch_frames, channels, height, width)
         return hidden_states

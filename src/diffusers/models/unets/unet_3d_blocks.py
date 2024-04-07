@@ -2146,6 +2146,8 @@ class CrossAttnDownBlockSpatioTemporal(nn.Module):
     ) -> Tuple[torch.FloatTensor, Tuple[torch.FloatTensor, ...]]:
         output_states = ()
 
+        save_dir ='/home/martin/stable-diffusion-jax/comp_layers/pt'
+        torch.save(hidden_states, f'{save_dir}/down_block_start')
         blocks = list(zip(self.resnets, self.attentions))
         for resnet, attn in blocks:
             if self.training and self.gradient_checkpointing:  # TODO
@@ -2180,12 +2182,15 @@ class CrossAttnDownBlockSpatioTemporal(nn.Module):
                     temb,
                     image_only_indicator=image_only_indicator,
                 )
+                torch.save(hidden_states, f'{save_dir}/down_block_after_resnet')
                 hidden_states = attn(
                     hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
                     image_only_indicator=image_only_indicator,
                     return_dict=False,
                 )[0]
+                torch.save(hidden_states, f'{save_dir}/down_block_after_attn')
+                # raise Exception('done pt')
 
             output_states = output_states + (hidden_states,)
 

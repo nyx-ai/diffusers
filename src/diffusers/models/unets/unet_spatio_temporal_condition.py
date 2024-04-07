@@ -395,11 +395,14 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         elif len(timesteps.shape) == 0:
             timesteps = timesteps[None].to(sample.device)
 
+        save_dir ='/home/martin/stable-diffusion-jax/comp_layers/pt'
+
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         batch_size, num_frames = sample.shape[:2]
         timesteps = timesteps.expand(batch_size)
 
         t_emb = self.time_proj(timesteps)
+        # torch.save(t_emb, f'{save_dir}/emb_after_time_proj')
 
         # `Timesteps` does not contain any weights and will always return f32 tensors
         # but time_embedding might actually be running in fp16. so we need to cast here.
@@ -407,12 +410,17 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         t_emb = t_emb.to(dtype=sample.dtype)
 
         emb = self.time_embedding(t_emb)
+        # torch.save(emb, f'{save_dir}/emb_after_time_embedding')
+
 
         time_embeds = self.add_time_proj(added_time_ids.flatten())
         time_embeds = time_embeds.reshape((batch_size, -1))
         time_embeds = time_embeds.to(emb.dtype)
+        # torch.save(time_embeds, f'{save_dir}/time_embeds_after_add_time_proj')
         aug_emb = self.add_embedding(time_embeds)
+        # torch.save(aug_emb, f'{save_dir}/aug_emb')
         emb = emb + aug_emb
+        # torch.save(emb, f'{save_dir}/emb_plus_aug_emb')
 
         # Flatten the batch and frames dimensions
         # sample: [batch, frames, channels, height, width] -> [batch * frames, channels, height, width]
@@ -429,6 +437,9 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         image_only_indicator = torch.zeros(batch_size, num_frames, dtype=sample.dtype, device=sample.device)
 
         down_block_res_samples = (sample,)
+
+        torch.save(sample, f'{save_dir}/before_down')
+
         for downsample_block in self.down_blocks:
             print('#################')
             print(f'shape sample: {sample.shape}')
@@ -453,6 +464,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
 
             down_block_res_samples += res_samples
 
+        torch.save(sample, f'{save_dir}/before_mid')
         # 4. mid
         print('#################')
         print('MID BLOCK')
@@ -466,6 +478,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
             encoder_hidden_states=encoder_hidden_states,
             image_only_indicator=image_only_indicator,
         )
+        torch.save(sample, f'{save_dir}/after_mid')
 
         # 5. up
         for i, upsample_block in enumerate(self.up_blocks):
@@ -495,6 +508,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
                     res_hidden_states_tuple=res_samples,
                     image_only_indicator=image_only_indicator,
                 )
+        torch.save(sample, f'{save_dir}/after_up')
 
         # 6. post-process
         sample = self.conv_norm_out(sample)

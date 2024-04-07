@@ -307,6 +307,9 @@ class TransformerSpatioTemporalModel(nn.Module):
         num_frames = image_only_indicator.shape[-1]
         batch_size = batch_frames // num_frames
 
+        save_dir ='/home/martin/stable-diffusion-jax/comp_layers/pt'
+        torch.save(hidden_states, f'{save_dir}/st_trans_start')
+
         time_context = encoder_hidden_states
         time_context_first_timestep = time_context[None, :].reshape(
             batch_size, num_frames, -1, time_context.shape[-1]
@@ -322,6 +325,7 @@ class TransformerSpatioTemporalModel(nn.Module):
         inner_dim = hidden_states.shape[1]
         hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch_frames, height * width, inner_dim)
         hidden_states = self.proj_in(hidden_states)
+        torch.save(hidden_states, f'{save_dir}/st_trans_proj_in')
 
         num_frames_emb = torch.arange(num_frames, device=hidden_states.device)
         num_frames_emb = num_frames_emb.repeat(batch_size, 1)
@@ -338,6 +342,7 @@ class TransformerSpatioTemporalModel(nn.Module):
         emb = self.time_pos_embed(t_emb)
         emb = emb[:, None, :]
         # emb shape (14, 1, 320)
+        torch.save(emb, f'{save_dir}/st_trans_emb')
 
         # 2. Blocks
         for block, temporal_block in zip(self.transformer_blocks, self.temporal_transformer_blocks):
@@ -355,26 +360,32 @@ class TransformerSpatioTemporalModel(nn.Module):
                     hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
                 )
+            torch.save(hidden_states, f'{save_dir}/st_trans_after_trans')
 
             hidden_states_mix = hidden_states
             hidden_states_mix = hidden_states_mix + emb
+            torch.save(hidden_states_mix, f'{save_dir}/st_trans_add_emb')
 
             hidden_states_mix = temporal_block(
                 hidden_states_mix,
                 num_frames=num_frames,
                 encoder_hidden_states=time_context,
             )
+            torch.save(hidden_states_mix, f'{save_dir}/st_trans_after_temp_trans')
             hidden_states = self.time_mixer(
                 x_spatial=hidden_states,
                 x_temporal=hidden_states_mix,
                 image_only_indicator=image_only_indicator,
             )
+            torch.save(hidden_states, f'{save_dir}/st_trans_after_mixer')
 
         # 3. Output
         hidden_states = self.proj_out(hidden_states)
+        torch.save(hidden_states, f'{save_dir}/st_trans_after_proj_out')
         hidden_states = hidden_states.reshape(batch_frames, height, width, inner_dim).permute(0, 3, 1, 2).contiguous()
 
         output = hidden_states + residual
+        torch.save(output, f'{save_dir}/st_trans_output')
 
         if not return_dict:
             return (output,)
