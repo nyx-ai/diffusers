@@ -91,7 +91,7 @@ def rename_key_and_reshape_tensor(pt_tuple_key, pt_tensor, random_flax_state_dic
     elif pt_tuple_key[-1] == "weight" and pt_tensor.ndim == 5:
         print(f'Assuming layer {pt_tuple_key} to be a Conv3D layer')
         old_shape = pt_tensor.shape
-        pt_tensor = pt_tensor.transpose(2, 3, 4, 0, 1)
+        pt_tensor = pt_tensor.transpose(2, 3, 4, 1, 0)
         new_shape = pt_tensor.shape
         print(f'Converted PyTorch weight from {old_shape} to {new_shape}')
         return renamed_pt_tuple_key, pt_tensor
