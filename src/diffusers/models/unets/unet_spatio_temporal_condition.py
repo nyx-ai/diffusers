@@ -430,13 +430,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
 
         down_block_res_samples = (sample,)
         for downsample_block in self.down_blocks:
-            print('#################')
-            print(f'shape sample: {sample.shape}')
-            print(f'shapes res_samples: {[rs.shape for rs in down_block_res_samples]}')
-            print(f'emb: {emb.shape}')
-            print(f'encoder_hidden_states: {encoder_hidden_states.shape}')
             if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
-                print('Running down block CrossAttnDownBlockSpatioTemporal')
                 sample, res_samples = downsample_block(
                     hidden_states=sample,
                     temb=emb,
@@ -444,7 +438,6 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
                     image_only_indicator=image_only_indicator,
                 )
             else:
-                print('Running down block DownBlockSpatioTemporal')
                 sample, res_samples = downsample_block(
                     hidden_states=sample,
                     temb=emb,
@@ -454,12 +447,6 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
             down_block_res_samples += res_samples
 
         # 4. mid
-        print('#################')
-        print('MID BLOCK')
-        print(f'shape sample: {sample.shape}')
-        print(f'shapes res_samples: {[rs.shape for rs in down_block_res_samples]}')
-        print(f'emb: {emb.shape}')
-        print(f'encoder_hidden_states: {encoder_hidden_states.shape}')
         sample = self.mid_block(
             hidden_states=sample,
             temb=emb,
@@ -471,15 +458,8 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         for i, upsample_block in enumerate(self.up_blocks):
             res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
             down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
-            print('#################')
-            print(f'UP BLOCK {i}')
-            print(f'shape sample: {sample.shape}')
-            print(f'shapes res_samples: {[rs.shape for rs in down_block_res_samples]}')
-            print(f'emb: {emb.shape}')
-            print(f'encoder_hidden_states: {encoder_hidden_states.shape}')
 
             if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
-                print('Running up block CrossAttnUpBlockSpatioTemporal')
                 sample = upsample_block(
                     hidden_states=sample,
                     temb=emb,
@@ -488,7 +468,6 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
                     image_only_indicator=image_only_indicator,
                 )
             else:
-                print('Running up block UpBlockSpatioTemporal')
                 sample = upsample_block(
                     hidden_states=sample,
                     temb=emb,
