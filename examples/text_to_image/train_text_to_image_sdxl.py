@@ -53,6 +53,7 @@ from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
 from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
+from transformers.optimization import Adafactor
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
@@ -267,6 +268,8 @@ def parse_args(input_args=None):
         action="store_true",
         help="whether to randomly flip images horizontally",
     )
+    parser.add_argument("--train_te1", action="store_true", help="whether to train TE1")
+    parser.add_argument("--train_te2", action="store_true", help="whether to train TE1")
     parser.add_argument(
         "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
     )
@@ -412,6 +415,9 @@ def parse_args(input_args=None):
     )
     parser.add_argument(
         "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
+    )
+    parser.add_argument(
+        "--use_adafactor", action="store_true", help="Whether or not to use Adafactor"
     )
     parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
     parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
@@ -696,10 +702,14 @@ def main(args):
 
     # Freeze vae and text encoders.
     vae.requires_grad_(False)
-    text_encoder_one.requires_grad_(False)
-    text_encoder_two.requires_grad_(False)
+    text_encoder_one.requires_grad_(args.train_te1)
+    text_encoder_two.requires_grad_(args.train_te1)
     # Set unet as trainable.
     unet.train()
+    if args.train_te1:
+        text_encoder_one.train()
+    if args.train_te2:
+        text_encoder_two.train()
 
     # For mixed precision training we cast all non-trainable weights to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
@@ -789,28 +799,31 @@ def main(args):
             args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
         )
 
-    # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
-    if args.use_8bit_adam:
-        try:
-            import bitsandbytes as bnb
-        except ImportError:
-            raise ImportError(
-                "To use 8-bit Adam, please install the bitsandbytes library: `pip install bitsandbytes`."
-            )
-
-        optimizer_class = bnb.optim.AdamW8bit
-    else:
-        optimizer_class = torch.optim.AdamW
-
-    # Optimizer creation
     params_to_optimize = unet.parameters()
-    optimizer = optimizer_class(
-        params_to_optimize,
-        lr=args.learning_rate,
-        betas=(args.adam_beta1, args.adam_beta2),
-        weight_decay=args.adam_weight_decay,
-        eps=args.adam_epsilon,
-    )
+    if args.use_adafactor:
+        optimizer = Adafactor(params_to_optimize, lr=args.learning_rate, relative_step=False)
+    else:
+        # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
+        if args.use_8bit_adam:
+            try:
+                import bitsandbytes as bnb
+            except ImportError:
+                raise ImportError(
+                    "To use 8-bit Adam, please install the bitsandbytes library: `pip install bitsandbytes`."
+                )
+
+            optimizer_class = bnb.optim.AdamW8bit
+        else:
+            optimizer_class = torch.optim.AdamW
+
+        # Optimizer creation
+        optimizer = optimizer_class(
+            params_to_optimize,
+            lr=args.learning_rate,
+            betas=(args.adam_beta1, args.adam_beta2),
+            weight_decay=args.adam_weight_decay,
+            eps=args.adam_epsilon,
+        )
 
     # Get the datasets: you can either provide your own training and evaluation files (see below)
     # or specify a Dataset from the hub (the dataset will be downloaded automatically from the datasets Hub).
@@ -1177,31 +1190,31 @@ def main(args):
                 train_loss = 0.0
 
                 # DeepSpeed requires saving weights on every device; saving weights only on the main process would cause issues.
-                if accelerator.distributed_type == DistributedType.DEEPSPEED or accelerator.is_main_process:
-                    if global_step % args.checkpointing_steps == 0:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                        if args.checkpoints_total_limit is not None:
-                            checkpoints = os.listdir(args.output_dir)
-                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
-                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
-
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                            if len(checkpoints) >= args.checkpoints_total_limit:
-                                num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
-                                removing_checkpoints = checkpoints[0:num_to_remove]
-
-                                logger.info(
-                                    f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-                                )
-                                logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
-
-                                for removing_checkpoint in removing_checkpoints:
-                                    removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
-
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
-                        logger.info(f"Saved state to {save_path}")
+                # if accelerator.distributed_type == DistributedType.DEEPSPEED or accelerator.is_main_process:
+                #     if global_step % args.checkpointing_steps == 0:
+                #         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                #         if args.checkpoints_total_limit is not None:
+                #             checkpoints = os.listdir(args.output_dir)
+                #             checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
+                #             checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+                #
+                #             # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                #             if len(checkpoints) >= args.checkpoints_total_limit:
+                #                 num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
+                #                 removing_checkpoints = checkpoints[0:num_to_remove]
+                #
+                #                 logger.info(
+                #                     f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
+                #                 )
+                #                 logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+                #
+                #                 for removing_checkpoint in removing_checkpoints:
+                #                     removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
+                #                     shutil.rmtree(removing_checkpoint)
+                #
+                #         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                #         accelerator.save_state(save_path)
+                #         logger.info(f"Saved state to {save_path}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -1209,69 +1222,69 @@ def main(args):
             if global_step >= args.max_train_steps:
                 break
 
-        if accelerator.is_main_process:
-            if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
-                logger.info(
-                    f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
-                    f" {args.validation_prompt}."
-                )
-                if args.use_ema:
-                    # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
-                    ema_unet.store(unet.parameters())
-                    ema_unet.copy_to(unet.parameters())
-
-                # create pipeline
-                vae = AutoencoderKL.from_pretrained(
-                    vae_path,
-                    subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
-                    revision=args.revision,
-                    variant=args.variant,
-                )
-                pipeline = StableDiffusionXLPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=vae,
-                    unet=accelerator.unwrap_model(unet),
-                    revision=args.revision,
-                    variant=args.variant,
-                    torch_dtype=weight_dtype,
-                )
-                if args.prediction_type is not None:
-                    scheduler_args = {"prediction_type": args.prediction_type}
-                    pipeline.scheduler = pipeline.scheduler.from_config(pipeline.scheduler.config, **scheduler_args)
-
-                pipeline = pipeline.to(accelerator.device)
-                pipeline.set_progress_bar_config(disable=True)
-
-                # run inference
-                generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
-                pipeline_args = {"prompt": args.validation_prompt}
-
-                with autocast_ctx:
-                    images = [
-                        pipeline(**pipeline_args, generator=generator, num_inference_steps=25).images[0]
-                        for _ in range(args.num_validation_images)
-                    ]
-
-                for tracker in accelerator.trackers:
-                    if tracker.name == "tensorboard":
-                        np_images = np.stack([np.asarray(img) for img in images])
-                        tracker.writer.add_images("validation", np_images, epoch, dataformats="NHWC")
-                    if tracker.name == "wandb":
-                        tracker.log(
-                            {
-                                "validation": [
-                                    wandb.Image(image, caption=f"{i}: {args.validation_prompt}")
-                                    for i, image in enumerate(images)
-                                ]
-                            }
-                        )
-
-                del pipeline
-                torch.cuda.empty_cache()
-
-                if args.use_ema:
-                    # Switch back to the original UNet parameters.
-                    ema_unet.restore(unet.parameters())
+        # if accelerator.is_main_process:
+        #     if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
+        #         logger.info(
+        #             f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
+        #             f" {args.validation_prompt}."
+        #         )
+        #         if args.use_ema:
+        #             # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
+        #             ema_unet.store(unet.parameters())
+        #             ema_unet.copy_to(unet.parameters())
+        #
+        #         # create pipeline
+        #         vae = AutoencoderKL.from_pretrained(
+        #             vae_path,
+        #             subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
+        #             revision=args.revision,
+        #             variant=args.variant,
+        #         )
+        #         pipeline = StableDiffusionXLPipeline.from_pretrained(
+        #             args.pretrained_model_name_or_path,
+        #             vae=vae,
+        #             unet=accelerator.unwrap_model(unet),
+        #             revision=args.revision,
+        #             variant=args.variant,
+        #             torch_dtype=weight_dtype,
+        #         )
+        #         if args.prediction_type is not None:
+        #             scheduler_args = {"prediction_type": args.prediction_type}
+        #             pipeline.scheduler = pipeline.scheduler.from_config(pipeline.scheduler.config, **scheduler_args)
+        #
+        #         pipeline = pipeline.to(accelerator.device)
+        #         pipeline.set_progress_bar_config(disable=True)
+        #
+        #         # run inference
+        #         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
+        #         pipeline_args = {"prompt": args.validation_prompt}
+        #
+        #         with autocast_ctx:
+        #             images = [
+        #                 pipeline(**pipeline_args, generator=generator, num_inference_steps=25).images[0]
+        #                 for _ in range(args.num_validation_images)
+        #             ]
+        #
+        #         for tracker in accelerator.trackers:
+        #             if tracker.name == "tensorboard":
+        #                 np_images = np.stack([np.asarray(img) for img in images])
+        #                 tracker.writer.add_images("validation", np_images, epoch, dataformats="NHWC")
+        #             if tracker.name == "wandb":
+        #                 tracker.log(
+        #                     {
+        #                         "validation": [
+        #                             wandb.Image(image, caption=f"{i}: {args.validation_prompt}")
+        #                             for i, image in enumerate(images)
+        #                         ]
+        #                     }
+        #                 )
+        #
+        #         del pipeline
+        #         torch.cuda.empty_cache()
+        #
+        #         if args.use_ema:
+        #             # Switch back to the original UNet parameters.
+        #             ema_unet.restore(unet.parameters())
 
     if ts is not None and te is not None:
         print(f'Time taken per step {(te-ts)/80.:.2f}s')

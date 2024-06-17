@@ -25,6 +25,7 @@ import shutil
 import warnings
 from contextlib import nullcontext
 from pathlib import Path
+import time
 
 import numpy as np
 import torch
@@ -57,6 +58,7 @@ from diffusers.utils import (
 )
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
 from diffusers.utils.torch_utils import is_compiled_module
+from transformers.optimization import Adafactor
 
 
 if is_wandb_available():
@@ -897,6 +899,7 @@ def encode_prompt(
     prompt: str,
     device=None,
     num_images_per_prompt: int = 1,
+    text_input_ids_list = None
 ):
     prompt = [prompt] if isinstance(prompt, str) else prompt
 
@@ -1229,7 +1232,7 @@ def main(args):
         params_to_optimize = [transformer_parameters_with_lr]
 
     # Optimizer creation
-    if not (args.optimizer.lower() == "prodigy" or args.optimizer.lower() == "adamw"):
+    if not (args.optimizer.lower() == "prodigy" or args.optimizer.lower() == "adamw" or args.optimizer.lower() == "adafactor"):
         logger.warning(
             f"Unsupported choice of optimizer: {args.optimizer}.Supported optimizers include [adamW, prodigy]."
             "Defaulting to adamW"
@@ -1261,8 +1264,7 @@ def main(args):
             weight_decay=args.adam_weight_decay,
             eps=args.adam_epsilon,
         )
-
-    if args.optimizer.lower() == "prodigy":
+    elif args.optimizer.lower() == "prodigy":
         try:
             import prodigyopt
         except ImportError:
@@ -1297,6 +1299,8 @@ def main(args):
             use_bias_correction=args.prodigy_use_bias_correction,
             safeguard_warmup=args.prodigy_safeguard_warmup,
         )
+    elif args.optimizer.lower() == "adafactor":
+        optimizer = Adafactor(params_to_optimize, lr=args.learning_rate, relative_step=False)
 
     # Dataset and DataLoaders creation:
     train_dataset = DreamBoothDataset(
@@ -1490,6 +1494,8 @@ def main(args):
             sigma = sigma.unsqueeze(-1)
         return sigma
 
+    ts, te = None, None
+
     for epoch in range(first_epoch, args.num_train_epochs):
         transformer.train()
         if args.train_text_encoder:
@@ -1501,6 +1507,11 @@ def main(args):
             models_to_accumulate = [transformer]
             if args.train_text_encoder:
                 models_to_accumulate.extend([text_encoder_one, text_encoder_two, text_encoder_three])
+
+            if global_step == 10:
+                ts = time.time()
+            elif global_step == 90:
+                te = time.time()
             with accelerator.accumulate(models_to_accumulate):
                 pixel_values = batch["pixel_values"].to(dtype=vae.dtype)
                 prompts = batch["prompts"]
@@ -1625,31 +1636,31 @@ def main(args):
                 progress_bar.update(1)
                 global_step += 1
 
-                if accelerator.is_main_process:
-                    if global_step % args.checkpointing_steps == 0:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                        if args.checkpoints_total_limit is not None:
-                            checkpoints = os.listdir(args.output_dir)
-                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
-                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
-
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                            if len(checkpoints) >= args.checkpoints_total_limit:
-                                num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
-                                removing_checkpoints = checkpoints[0:num_to_remove]
-
-                                logger.info(
-                                    f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-                                )
-                                logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
-
-                                for removing_checkpoint in removing_checkpoints:
-                                    removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
-
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
-                        logger.info(f"Saved state to {save_path}")
+                # if accelerator.is_main_process:
+                #     if global_step % args.checkpointing_steps == 0:
+                #         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                #         if args.checkpoints_total_limit is not None:
+                #             checkpoints = os.listdir(args.output_dir)
+                #             checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
+                #             checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+                #
+                #             # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                #             if len(checkpoints) >= args.checkpoints_total_limit:
+                #                 num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
+                #                 removing_checkpoints = checkpoints[0:num_to_remove]
+                #
+                #                 logger.info(
+                #                     f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
+                #                 )
+                #                 logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+                #
+                #                 for removing_checkpoint in removing_checkpoints:
+                #                     removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
+                #                     shutil.rmtree(removing_checkpoint)
+                #
+                #         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                #         accelerator.save_state(save_path)
+                #         logger.info(f"Saved state to {save_path}")
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -1658,101 +1669,104 @@ def main(args):
             if global_step >= args.max_train_steps:
                 break
 
-        if accelerator.is_main_process:
-            if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
-                # create pipeline
-                if not args.train_text_encoder:
-                    text_encoder_one, text_encoder_two, text_encoder_three = load_text_encoders(
-                        text_encoder_cls_one, text_encoder_cls_two, text_encoder_cls_three
-                    )
-                pipeline = StableDiffusion3Pipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=vae,
-                    text_encoder=accelerator.unwrap_model(text_encoder_one),
-                    text_encoder_2=accelerator.unwrap_model(text_encoder_two),
-                    text_encoder_3=accelerator.unwrap_model(text_encoder_three),
-                    transformer=accelerator.unwrap_model(transformer),
-                    revision=args.revision,
-                    variant=args.variant,
-                    torch_dtype=weight_dtype,
-                )
-                pipeline_args = {"prompt": args.validation_prompt}
-                images = log_validation(
-                    pipeline=pipeline,
-                    args=args,
-                    accelerator=accelerator,
-                    pipeline_args=pipeline_args,
-                    epoch=epoch,
-                )
-                if not args.train_text_encoder:
-                    del text_encoder_one, text_encoder_two, text_encoder_three
-                    torch.cuda.empty_cache()
-                    gc.collect()
+        # if accelerator.is_main_process:
+        #     if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
+        #         # create pipeline
+        #         if not args.train_text_encoder:
+        #             text_encoder_one, text_encoder_two, text_encoder_three = load_text_encoders(
+        #                 text_encoder_cls_one, text_encoder_cls_two, text_encoder_cls_three
+        #             )
+        #         pipeline = StableDiffusion3Pipeline.from_pretrained(
+        #             args.pretrained_model_name_or_path,
+        #             vae=vae,
+        #             text_encoder=accelerator.unwrap_model(text_encoder_one),
+        #             text_encoder_2=accelerator.unwrap_model(text_encoder_two),
+        #             text_encoder_3=accelerator.unwrap_model(text_encoder_three),
+        #             transformer=accelerator.unwrap_model(transformer),
+        #             revision=args.revision,
+        #             variant=args.variant,
+        #             torch_dtype=weight_dtype,
+        #         )
+        #         pipeline_args = {"prompt": args.validation_prompt}
+        #         images = log_validation(
+        #             pipeline=pipeline,
+        #             args=args,
+        #             accelerator=accelerator,
+        #             pipeline_args=pipeline_args,
+        #             epoch=epoch,
+        #         )
+        #         if not args.train_text_encoder:
+        #             del text_encoder_one, text_encoder_two, text_encoder_three
+        #             torch.cuda.empty_cache()
+        #             gc.collect()
 
     # Save the lora layers
     accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        transformer = unwrap_model(transformer)
-
-        if args.train_text_encoder:
-            text_encoder_one = unwrap_model(text_encoder_one)
-            text_encoder_two = unwrap_model(text_encoder_two)
-            text_encoder_three = unwrap_model(text_encoder_three)
-            pipeline = StableDiffusion3Pipeline.from_pretrained(
-                args.pretrained_model_name_or_path,
-                transformer=transformer,
-                text_encoder=text_encoder_one,
-                text_encoder_2=text_encoder_two,
-                text_encoder_3=text_encoder_three,
-            )
-        else:
-            pipeline = StableDiffusion3Pipeline.from_pretrained(
-                args.pretrained_model_name_or_path, transformer=transformer
-            )
-
-        # save the pipeline
-        pipeline.save_pretrained(args.output_dir)
-
-        # Final inference
-        # Load previous pipeline
-        pipeline = StableDiffusion3Pipeline.from_pretrained(
-            args.output_dir,
-            revision=args.revision,
-            variant=args.variant,
-            torch_dtype=weight_dtype,
-        )
-
-        # run inference
-        images = []
-        if args.validation_prompt and args.num_validation_images > 0:
-            pipeline_args = {"prompt": args.validation_prompt}
-            images = log_validation(
-                pipeline=pipeline,
-                args=args,
-                accelerator=accelerator,
-                pipeline_args=pipeline_args,
-                epoch=epoch,
-                is_final_validation=True,
-            )
-
-        if args.push_to_hub:
-            save_model_card(
-                repo_id,
-                images=images,
-                base_model=args.pretrained_model_name_or_path,
-                train_text_encoder=args.train_text_encoder,
-                instance_prompt=args.instance_prompt,
-                validation_prompt=args.validation_prompt,
-                repo_folder=args.output_dir,
-            )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
+    # if accelerator.is_main_process:
+    #     transformer = unwrap_model(transformer)
+    #
+    #     if args.train_text_encoder:
+    #         text_encoder_one = unwrap_model(text_encoder_one)
+    #         text_encoder_two = unwrap_model(text_encoder_two)
+    #         text_encoder_three = unwrap_model(text_encoder_three)
+    #         pipeline = StableDiffusion3Pipeline.from_pretrained(
+    #             args.pretrained_model_name_or_path,
+    #             transformer=transformer,
+    #             text_encoder=text_encoder_one,
+    #             text_encoder_2=text_encoder_two,
+    #             text_encoder_3=text_encoder_three,
+    #         )
+    #     else:
+    #         pipeline = StableDiffusion3Pipeline.from_pretrained(
+    #             args.pretrained_model_name_or_path, transformer=transformer
+    #         )
+    #
+    #     # save the pipeline
+    #     pipeline.save_pretrained(args.output_dir)
+    #
+    #     # Final inference
+    #     # Load previous pipeline
+    #     pipeline = StableDiffusion3Pipeline.from_pretrained(
+    #         args.output_dir,
+    #         revision=args.revision,
+    #         variant=args.variant,
+    #         torch_dtype=weight_dtype,
+    #     )
+    #
+    #     # run inference
+    #     images = []
+    #     if args.validation_prompt and args.num_validation_images > 0:
+    #         pipeline_args = {"prompt": args.validation_prompt}
+    #         images = log_validation(
+    #             pipeline=pipeline,
+    #             args=args,
+    #             accelerator=accelerator,
+    #             pipeline_args=pipeline_args,
+    #             epoch=epoch,
+    #             is_final_validation=True,
+    #         )
+    #
+    #     if args.push_to_hub:
+    #         save_model_card(
+    #             repo_id,
+    #             images=images,
+    #             base_model=args.pretrained_model_name_or_path,
+    #             train_text_encoder=args.train_text_encoder,
+    #             instance_prompt=args.instance_prompt,
+    #             validation_prompt=args.validation_prompt,
+    #             repo_folder=args.output_dir,
+    #         )
+    #         upload_folder(
+    #             repo_id=repo_id,
+    #             folder_path=args.output_dir,
+    #             commit_message="End of training",
+    #             ignore_patterns=["step_*", "epoch_*"],
+    #         )
 
     accelerator.end_training()
+
+    if te is not None and ts is not None:
+        print(f'Time taken per step: {(te-ts)/80:.2f}s')
 
 
 if __name__ == "__main__":
