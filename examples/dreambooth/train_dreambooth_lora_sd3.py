@@ -25,6 +25,7 @@ import shutil
 import warnings
 from contextlib import nullcontext
 from pathlib import Path
+import time
 
 import numpy as np
 import torch
@@ -1439,11 +1440,17 @@ def main(args):
             sigma = sigma.unsqueeze(-1)
         return sigma
 
+    ts, te = None, None
+
     for epoch in range(first_epoch, args.num_train_epochs):
         transformer.train()
 
         for step, batch in enumerate(train_dataloader):
             models_to_accumulate = [transformer]
+            if global_step == 10:
+                ts = time.time()
+            elif global_step == 90:
+                te = time.time()
             with accelerator.accumulate(models_to_accumulate):
                 pixel_values = batch["pixel_values"].to(dtype=vae.dtype)
                 prompts = batch["prompts"]
@@ -1601,63 +1608,67 @@ def main(args):
 
     # Save the lora layers
     accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        transformer = unwrap_model(transformer)
-        transformer = transformer.to(torch.float32)
-        transformer_lora_layers = get_peft_model_state_dict(transformer)
-
-        StableDiffusion3Pipeline.save_lora_weights(
-            save_directory=args.output_dir, transformer_lora_layers=transformer_lora_layers
-        )
-
-        pipeline = StableDiffusion3Pipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            revision=args.revision,
-            variant=args.variant,
-            torch_dtype=weight_dtype,
-        )
-
-        # Final inference
-        # Load previous pipeline
-        pipeline = StableDiffusion3Pipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            revision=args.revision,
-            variant=args.variant,
-            torch_dtype=weight_dtype,
-        )
-        # load attention processors
-        pipeline.load_lora_weights(args.output_dir)
-
-        # run inference
-        images = []
-        if args.validation_prompt and args.num_validation_images > 0:
-            pipeline_args = {"prompt": args.validation_prompt}
-            images = log_validation(
-                pipeline=pipeline,
-                args=args,
-                accelerator=accelerator,
-                pipeline_args=pipeline_args,
-                epoch=epoch,
-                is_final_validation=True,
-            )
-
-        if args.push_to_hub:
-            save_model_card(
-                repo_id,
-                images=images,
-                base_model=args.pretrained_model_name_or_path,
-                instance_prompt=args.instance_prompt,
-                validation_prompt=args.validation_prompt,
-                repo_folder=args.output_dir,
-            )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
+    # if accelerator.is_main_process:
+    #     transformer = unwrap_model(transformer)
+    #     transformer = transformer.to(torch.float32)
+    #     transformer_lora_layers = get_peft_model_state_dict(transformer)
+    #
+    #     StableDiffusion3Pipeline.save_lora_weights(
+    #         save_directory=args.output_dir, transformer_lora_layers=transformer_lora_layers
+    #     )
+    #
+    #     pipeline = StableDiffusion3Pipeline.from_pretrained(
+    #         args.pretrained_model_name_or_path,
+    #         revision=args.revision,
+    #         variant=args.variant,
+    #         torch_dtype=weight_dtype,
+    #     )
+    #
+    #     # Final inference
+    #     # Load previous pipeline
+    #     pipeline = StableDiffusion3Pipeline.from_pretrained(
+    #         args.pretrained_model_name_or_path,
+    #         revision=args.revision,
+    #         variant=args.variant,
+    #         torch_dtype=weight_dtype,
+    #     )
+    #     # load attention processors
+    #     pipeline.load_lora_weights(args.output_dir)
+    #
+    #     # run inference
+    #     images = []
+    #     if args.validation_prompt and args.num_validation_images > 0:
+    #         pipeline_args = {"prompt": args.validation_prompt}
+    #         images = log_validation(
+    #             pipeline=pipeline,
+    #             args=args,
+    #             accelerator=accelerator,
+    #             pipeline_args=pipeline_args,
+    #             epoch=epoch,
+    #             is_final_validation=True,
+    #         )
+    #
+    #     if args.push_to_hub:
+    #         save_model_card(
+    #             repo_id,
+    #             images=images,
+    #             base_model=args.pretrained_model_name_or_path,
+    #             instance_prompt=args.instance_prompt,
+    #             validation_prompt=args.validation_prompt,
+    #             repo_folder=args.output_dir,
+    #         )
+    #         upload_folder(
+    #             repo_id=repo_id,
+    #             folder_path=args.output_dir,
+    #             commit_message="End of training",
+    #             ignore_patterns=["step_*", "epoch_*"],
+    #         )
 
     accelerator.end_training()
+
+    if ts is not None and te is not None:
+        print(f'Time taken per step: {(te-ts)/80.0:.2f}s')
+
 
 
 if __name__ == "__main__":

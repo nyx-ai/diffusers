@@ -23,6 +23,7 @@ import random
 import shutil
 from contextlib import nullcontext
 from pathlib import Path
+import time
 
 import datasets
 import numpy as np
@@ -1079,6 +1080,7 @@ def main(args):
         # Only show the progress bar once on each machine.
         disable=not accelerator.is_local_main_process,
     )
+    ts, te = None, None
 
     for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
@@ -1087,6 +1089,13 @@ def main(args):
             text_encoder_two.train()
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
+
+
+            if global_step == 10:
+                ts = time.time()
+            elif global_step == 10:
+                te = time.time()
+
             with accelerator.accumulate(unet):
                 # Convert images to latent space
                 if args.pretrained_vae_model_name_or_path is not None:
@@ -1201,31 +1210,31 @@ def main(args):
                 train_loss = 0.0
 
                 # DeepSpeed requires saving weights on every device; saving weights only on the main process would cause issues.
-                if accelerator.distributed_type == DistributedType.DEEPSPEED or accelerator.is_main_process:
-                    if global_step % args.checkpointing_steps == 0:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                        if args.checkpoints_total_limit is not None:
-                            checkpoints = os.listdir(args.output_dir)
-                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
-                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
-
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                            if len(checkpoints) >= args.checkpoints_total_limit:
-                                num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
-                                removing_checkpoints = checkpoints[0:num_to_remove]
-
-                                logger.info(
-                                    f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-                                )
-                                logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
-
-                                for removing_checkpoint in removing_checkpoints:
-                                    removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
-
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
-                        logger.info(f"Saved state to {save_path}")
+                # if accelerator.distributed_type == DistributedType.DEEPSPEED or accelerator.is_main_process:
+                #     if global_step % args.checkpointing_steps == 0:
+                #         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                #         if args.checkpoints_total_limit is not None:
+                #             checkpoints = os.listdir(args.output_dir)
+                #             checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
+                #             checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+                #
+                #             # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                #             if len(checkpoints) >= args.checkpoints_total_limit:
+                #                 num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
+                #                 removing_checkpoints = checkpoints[0:num_to_remove]
+                #
+                #                 logger.info(
+                #                     f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
+                #                 )
+                #                 logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+                #
+                #                 for removing_checkpoint in removing_checkpoints:
+                #                     removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
+                #                     shutil.rmtree(removing_checkpoint)
+                #
+                #         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                #         accelerator.save_state(save_path)
+                #         logger.info(f"Saved state to {save_path}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -1254,73 +1263,74 @@ def main(args):
 
     # Save the lora layers
     accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        unet = unwrap_model(unet)
-        unet_lora_state_dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(unet))
-
-        if args.train_text_encoder:
-            text_encoder_one = unwrap_model(text_encoder_one)
-            text_encoder_two = unwrap_model(text_encoder_two)
-
-            text_encoder_lora_layers = convert_state_dict_to_diffusers(get_peft_model_state_dict(text_encoder_one))
-            text_encoder_2_lora_layers = convert_state_dict_to_diffusers(get_peft_model_state_dict(text_encoder_two))
-        else:
-            text_encoder_lora_layers = None
-            text_encoder_2_lora_layers = None
-
-        StableDiffusionXLPipeline.save_lora_weights(
-            save_directory=args.output_dir,
-            unet_lora_layers=unet_lora_state_dict,
-            text_encoder_lora_layers=text_encoder_lora_layers,
-            text_encoder_2_lora_layers=text_encoder_2_lora_layers,
-        )
-
-        del unet
-        del text_encoder_one
-        del text_encoder_two
-        del text_encoder_lora_layers
-        del text_encoder_2_lora_layers
-        torch.cuda.empty_cache()
-
-        # Final inference
-        # Make sure vae.dtype is consistent with the unet.dtype
-        if args.mixed_precision == "fp16":
-            vae.to(weight_dtype)
-        # Load previous pipeline
-        pipeline = StableDiffusionXLPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            vae=vae,
-            revision=args.revision,
-            variant=args.variant,
-            torch_dtype=weight_dtype,
-        )
-
-        # load attention processors
-        pipeline.load_lora_weights(args.output_dir)
-
-        # run inference
-        if args.validation_prompt and args.num_validation_images > 0:
-            images = log_validation(pipeline, args, accelerator, epoch, is_final_validation=True)
-
-        if args.push_to_hub:
-            save_model_card(
-                repo_id,
-                images=images,
-                base_model=args.pretrained_model_name_or_path,
-                dataset_name=args.dataset_name,
-                train_text_encoder=args.train_text_encoder,
-                repo_folder=args.output_dir,
-                vae_path=args.pretrained_vae_model_name_or_path,
-            )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
+    # if accelerator.is_main_process:
+    #     unet = unwrap_model(unet)
+    #     unet_lora_state_dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(unet))
+    #
+    #     if args.train_text_encoder:
+    #         text_encoder_one = unwrap_model(text_encoder_one)
+    #         text_encoder_two = unwrap_model(text_encoder_two)
+    #
+    #         text_encoder_lora_layers = convert_state_dict_to_diffusers(get_peft_model_state_dict(text_encoder_one))
+    #         text_encoder_2_lora_layers = convert_state_dict_to_diffusers(get_peft_model_state_dict(text_encoder_two))
+    #     else:
+    #         text_encoder_lora_layers = None
+    #         text_encoder_2_lora_layers = None
+    #
+    #     StableDiffusionXLPipeline.save_lora_weights(
+    #         save_directory=args.output_dir,
+    #         unet_lora_layers=unet_lora_state_dict,
+    #         text_encoder_lora_layers=text_encoder_lora_layers,
+    #         text_encoder_2_lora_layers=text_encoder_2_lora_layers,
+    #     )
+    #
+    #     del unet
+    #     del text_encoder_one
+    #     del text_encoder_two
+    #     del text_encoder_lora_layers
+    #     del text_encoder_2_lora_layers
+    #     torch.cuda.empty_cache()
+    #
+    #     # Final inference
+    #     # Make sure vae.dtype is consistent with the unet.dtype
+    #     if args.mixed_precision == "fp16":
+    #         vae.to(weight_dtype)
+    #     # Load previous pipeline
+    #     pipeline = StableDiffusionXLPipeline.from_pretrained(
+    #         args.pretrained_model_name_or_path,
+    #         vae=vae,
+    #         revision=args.revision,
+    #         variant=args.variant,
+    #         torch_dtype=weight_dtype,
+    #     )
+    #
+    #     # load attention processors
+    #     pipeline.load_lora_weights(args.output_dir)
+    #
+    #     # run inference
+    #     if args.validation_prompt and args.num_validation_images > 0:
+    #         images = log_validation(pipeline, args, accelerator, epoch, is_final_validation=True)
+    #
+    #     if args.push_to_hub:
+    #         save_model_card(
+    #             repo_id,
+    #             images=images,
+    #             base_model=args.pretrained_model_name_or_path,
+    #             dataset_name=args.dataset_name,
+    #             train_text_encoder=args.train_text_encoder,
+    #             repo_folder=args.output_dir,
+    #             vae_path=args.pretrained_vae_model_name_or_path,
+    #         )
+    #         upload_folder(
+    #             repo_id=repo_id,
+    #             folder_path=args.output_dir,
+    #             commit_message="End of training",
+    #             ignore_patterns=["step_*", "epoch_*"],
+    #         )
 
     accelerator.end_training()
-
+    if ts is not None and te is not None:
+        print(f'Time taken per step {(te-ts)/80.:.2f}s')
 
 if __name__ == "__main__":
     args = parse_args()

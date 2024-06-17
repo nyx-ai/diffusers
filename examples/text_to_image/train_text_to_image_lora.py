@@ -23,6 +23,7 @@ import random
 import shutil
 from contextlib import nullcontext
 from pathlib import Path
+import time
 
 import datasets
 import numpy as np
@@ -785,11 +786,18 @@ def main():
         # Only show the progress bar once on each machine.
         disable=not accelerator.is_local_main_process,
     )
+    ts, te = None, None
 
     for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
+
+            if global_step == 10:
+                ts = time.time()
+            elif global_step == 90:
+                te = time.time()
+
             with accelerator.accumulate(unet):
                 # Convert images to latent space
                 latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
@@ -891,21 +899,21 @@ def main():
                                     removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
                                     shutil.rmtree(removing_checkpoint)
 
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
+                        # save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        # accelerator.save_state(save_path)
+                        #
+                        # unwrapped_unet = unwrap_model(unet)
+                        # unet_lora_state_dict = convert_state_dict_to_diffusers(
+                        #     get_peft_model_state_dict(unwrapped_unet)
+                        # )
+                        #
+                        # StableDiffusionPipeline.save_lora_weights(
+                        #     save_directory=save_path,
+                        #     unet_lora_layers=unet_lora_state_dict,
+                        #     safe_serialization=True,
+                        # )
 
-                        unwrapped_unet = unwrap_model(unet)
-                        unet_lora_state_dict = convert_state_dict_to_diffusers(
-                            get_peft_model_state_dict(unwrapped_unet)
-                        )
-
-                        StableDiffusionPipeline.save_lora_weights(
-                            save_directory=save_path,
-                            unet_lora_layers=unet_lora_state_dict,
-                            safe_serialization=True,
-                        )
-
-                        logger.info(f"Saved state to {save_path}")
+                        # logger.info(f"Saved state to {save_path}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -930,49 +938,51 @@ def main():
 
     # Save the lora layers
     accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        unet = unet.to(torch.float32)
-
-        unwrapped_unet = unwrap_model(unet)
-        unet_lora_state_dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(unwrapped_unet))
-        StableDiffusionPipeline.save_lora_weights(
-            save_directory=args.output_dir,
-            unet_lora_layers=unet_lora_state_dict,
-            safe_serialization=True,
-        )
-
-        # Final inference
-        # Load previous pipeline
-        if args.validation_prompt is not None:
-            pipeline = DiffusionPipeline.from_pretrained(
-                args.pretrained_model_name_or_path,
-                revision=args.revision,
-                variant=args.variant,
-                torch_dtype=weight_dtype,
-            )
-
-            # load attention processors
-            pipeline.load_lora_weights(args.output_dir)
-
-            # run inference
-            images = log_validation(pipeline, args, accelerator, epoch, is_final_validation=True)
-
-        if args.push_to_hub:
-            save_model_card(
-                repo_id,
-                images=images,
-                base_model=args.pretrained_model_name_or_path,
-                dataset_name=args.dataset_name,
-                repo_folder=args.output_dir,
-            )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
+    # if accelerator.is_main_process:
+    #     unet = unet.to(torch.float32)
+    #
+    #     unwrapped_unet = unwrap_model(unet)
+    #     unet_lora_state_dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(unwrapped_unet))
+    #     StableDiffusionPipeline.save_lora_weights(
+    #         save_directory=args.output_dir,
+    #         unet_lora_layers=unet_lora_state_dict,
+    #         safe_serialization=True,
+    #     )
+    #
+    #     # Final inference
+    #     # Load previous pipeline
+    #     if args.validation_prompt is not None:
+    #         pipeline = DiffusionPipeline.from_pretrained(
+    #             args.pretrained_model_name_or_path,
+    #             revision=args.revision,
+    #             variant=args.variant,
+    #             torch_dtype=weight_dtype,
+    #         )
+    #
+    #         # load attention processors
+    #         pipeline.load_lora_weights(args.output_dir)
+    #
+    #         # run inference
+    #         images = log_validation(pipeline, args, accelerator, epoch, is_final_validation=True)
+    #
+    #     if args.push_to_hub:
+    #         save_model_card(
+    #             repo_id,
+    #             images=images,
+    #             base_model=args.pretrained_model_name_or_path,
+    #             dataset_name=args.dataset_name,
+    #             repo_folder=args.output_dir,
+    #         )
+    #         upload_folder(
+    #             repo_id=repo_id,
+    #             folder_path=args.output_dir,
+    #             commit_message="End of training",
+    #             ignore_patterns=["step_*", "epoch_*"],
+    #         )
 
     accelerator.end_training()
+    if ts is not None and te is not None:
+        print(f'Time taken per step {(te-ts)/80.:.2f}s')
 
 
 if __name__ == "__main__":

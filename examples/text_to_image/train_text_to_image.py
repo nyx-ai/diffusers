@@ -22,6 +22,7 @@ import random
 import shutil
 from contextlib import nullcontext
 from pathlib import Path
+from timeit import default_timer as timer
 
 import accelerate
 import datasets
@@ -387,6 +388,7 @@ def parse_args():
         ),
     )
     parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA model.")
+    parser.add_argument("--use_torch_compile", action="store_true", help="Use torch.compile()")
     parser.add_argument(
         "--non_ema_revision",
         type=str,
@@ -831,6 +833,8 @@ def main():
     unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         unet, optimizer, train_dataloader, lr_scheduler
     )
+    if args.use_torch_compile:
+        unet = torch.compile(unet, mode="default")
 
     if args.use_ema:
         ema_unet.to(accelerator.device)
@@ -847,6 +851,8 @@ def main():
 
     # Move text_encode and vae to gpu and cast to weight_dtype
     text_encoder.to(accelerator.device, dtype=weight_dtype)
+    if args.use_torch_compile:
+        text_encoder = torch.compile(text_encoder, mode="default")
     vae.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -918,9 +924,15 @@ def main():
         disable=not accelerator.is_local_main_process,
     )
 
+    ts, te = None, None
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
+            if global_step == 10:
+                ts = timer()
+            elif global_step == 90:
+                te = timer()
+
             with accelerator.accumulate(unet):
                 # Convert images to latent space
                 latents = vae.encode(batch["pixel_values"].to(weight_dtype)).latent_dist.sample()
@@ -1039,9 +1051,9 @@ def main():
                                     removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
                                     shutil.rmtree(removing_checkpoint)
 
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
-                        logger.info(f"Saved state to {save_path}")
+                        # save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        # accelerator.save_state(save_path)
+                        # logger.info(f"Saved state to {save_path}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -1071,52 +1083,55 @@ def main():
 
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        unet = unwrap_model(unet)
-        if args.use_ema:
-            ema_unet.copy_to(unet.parameters())
-
-        pipeline = StableDiffusionPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            text_encoder=text_encoder,
-            vae=vae,
-            unet=unet,
-            revision=args.revision,
-            variant=args.variant,
-        )
-        pipeline.save_pretrained(args.output_dir)
-
-        # Run a final round of inference.
-        images = []
-        if args.validation_prompts is not None:
-            logger.info("Running inference for collecting generated images...")
-            pipeline = pipeline.to(accelerator.device)
-            pipeline.torch_dtype = weight_dtype
-            pipeline.set_progress_bar_config(disable=True)
-
-            if args.enable_xformers_memory_efficient_attention:
-                pipeline.enable_xformers_memory_efficient_attention()
-
-            if args.seed is None:
-                generator = None
-            else:
-                generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
-
-            for i in range(len(args.validation_prompts)):
-                with torch.autocast("cuda"):
-                    image = pipeline(args.validation_prompts[i], num_inference_steps=20, generator=generator).images[0]
-                images.append(image)
-
-        if args.push_to_hub:
-            save_model_card(args, repo_id, images, repo_folder=args.output_dir)
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
+    # if accelerator.is_main_process:
+    #     unet = unwrap_model(unet)
+    #     if args.use_ema:
+    #         ema_unet.copy_to(unet.parameters())
+    #
+    #     pipeline = StableDiffusionPipeline.from_pretrained(
+    #         args.pretrained_model_name_or_path,
+    #         text_encoder=text_encoder,
+    #         vae=vae,
+    #         unet=unet,
+    #         revision=args.revision,
+    #         variant=args.variant,
+    #     )
+    #     pipeline.save_pretrained(args.output_dir)
+    #
+    #     # Run a final round of inference.
+    #     images = []
+    #     if args.validation_prompts is not None:
+    #         logger.info("Running inference for collecting generated images...")
+    #         pipeline = pipeline.to(accelerator.device)
+    #         pipeline.torch_dtype = weight_dtype
+    #         pipeline.set_progress_bar_config(disable=True)
+    #
+    #         if args.enable_xformers_memory_efficient_attention:
+    #             pipeline.enable_xformers_memory_efficient_attention()
+    #
+    #         if args.seed is None:
+    #             generator = None
+    #         else:
+    #             generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
+    #
+    #         for i in range(len(args.validation_prompts)):
+    #             with torch.autocast("cuda"):
+    #                 image = pipeline(args.validation_prompts[i], num_inference_steps=20, generator=generator).images[0]
+    #             images.append(image)
+    #
+    #     if args.push_to_hub:
+    #         save_model_card(args, repo_id, images, repo_folder=args.output_dir)
+    #         upload_folder(
+    #             repo_id=repo_id,
+    #             folder_path=args.output_dir,
+    #             commit_message="End of training",
+    #             ignore_patterns=["step_*", "epoch_*"],
+    #         )
 
     accelerator.end_training()
+
+    if ts is not None and te is not None:
+        print(f'Time taken per step: {(te-ts)/80:.2f}s')
 
 
 if __name__ == "__main__":

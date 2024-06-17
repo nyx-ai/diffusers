@@ -25,6 +25,7 @@ import random
 import shutil
 from contextlib import nullcontext
 from pathlib import Path
+import time
 
 import accelerate
 import datasets
@@ -1054,10 +1055,15 @@ def main(args):
         # Only show the progress bar once on each machine.
         disable=not accelerator.is_local_main_process,
     )
+    ts, te = None, None
 
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
+            if global_step == 10:
+                ts = time.time()
+            elif global_step == 90:
+                te = time.time()
             with accelerator.accumulate(unet):
                 # Sample noise that we'll add to the latents
                 model_input = batch["model_input"].to(accelerator.device)
@@ -1267,75 +1273,78 @@ def main(args):
                     # Switch back to the original UNet parameters.
                     ema_unet.restore(unet.parameters())
 
+    if ts is not None and te is not None:
+        print(f'Time taken per step {(te-ts)/80.:.2f}s')
+
     accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        unet = unwrap_model(unet)
-        if args.use_ema:
-            ema_unet.copy_to(unet.parameters())
-
-        # Serialize pipeline.
-        vae = AutoencoderKL.from_pretrained(
-            vae_path,
-            subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
-            revision=args.revision,
-            variant=args.variant,
-            torch_dtype=weight_dtype,
-        )
-        pipeline = StableDiffusionXLPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            unet=unet,
-            vae=vae,
-            revision=args.revision,
-            variant=args.variant,
-            torch_dtype=weight_dtype,
-        )
-        if args.prediction_type is not None:
-            scheduler_args = {"prediction_type": args.prediction_type}
-            pipeline.scheduler = pipeline.scheduler.from_config(pipeline.scheduler.config, **scheduler_args)
-        pipeline.save_pretrained(args.output_dir)
-
-        # run inference
-        images = []
-        if args.validation_prompt and args.num_validation_images > 0:
-            pipeline = pipeline.to(accelerator.device)
-            generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
-
-            with autocast_ctx:
-                images = [
-                    pipeline(args.validation_prompt, num_inference_steps=25, generator=generator).images[0]
-                    for _ in range(args.num_validation_images)
-                ]
-
-            for tracker in accelerator.trackers:
-                if tracker.name == "tensorboard":
-                    np_images = np.stack([np.asarray(img) for img in images])
-                    tracker.writer.add_images("test", np_images, epoch, dataformats="NHWC")
-                if tracker.name == "wandb":
-                    tracker.log(
-                        {
-                            "test": [
-                                wandb.Image(image, caption=f"{i}: {args.validation_prompt}")
-                                for i, image in enumerate(images)
-                            ]
-                        }
-                    )
-
-        if args.push_to_hub:
-            save_model_card(
-                repo_id=repo_id,
-                images=images,
-                validation_prompt=args.validation_prompt,
-                base_model=args.pretrained_model_name_or_path,
-                dataset_name=args.dataset_name,
-                repo_folder=args.output_dir,
-                vae_path=args.pretrained_vae_model_name_or_path,
-            )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
+    # if accelerator.is_main_process:
+    #     unet = unwrap_model(unet)
+    #     if args.use_ema:
+    #         ema_unet.copy_to(unet.parameters())
+    #
+    #     # Serialize pipeline.
+    #     vae = AutoencoderKL.from_pretrained(
+    #         vae_path,
+    #         subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
+    #         revision=args.revision,
+    #         variant=args.variant,
+    #         torch_dtype=weight_dtype,
+    #     )
+    #     pipeline = StableDiffusionXLPipeline.from_pretrained(
+    #         args.pretrained_model_name_or_path,
+    #         unet=unet,
+    #         vae=vae,
+    #         revision=args.revision,
+    #         variant=args.variant,
+    #         torch_dtype=weight_dtype,
+    #     )
+    #     if args.prediction_type is not None:
+    #         scheduler_args = {"prediction_type": args.prediction_type}
+    #         pipeline.scheduler = pipeline.scheduler.from_config(pipeline.scheduler.config, **scheduler_args)
+    #     pipeline.save_pretrained(args.output_dir)
+    #
+    #     # run inference
+    #     images = []
+    #     if args.validation_prompt and args.num_validation_images > 0:
+    #         pipeline = pipeline.to(accelerator.device)
+    #         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
+    #
+    #         with autocast_ctx:
+    #             images = [
+    #                 pipeline(args.validation_prompt, num_inference_steps=25, generator=generator).images[0]
+    #                 for _ in range(args.num_validation_images)
+    #             ]
+    #
+    #         for tracker in accelerator.trackers:
+    #             if tracker.name == "tensorboard":
+    #                 np_images = np.stack([np.asarray(img) for img in images])
+    #                 tracker.writer.add_images("test", np_images, epoch, dataformats="NHWC")
+    #             if tracker.name == "wandb":
+    #                 tracker.log(
+    #                     {
+    #                         "test": [
+    #                             wandb.Image(image, caption=f"{i}: {args.validation_prompt}")
+    #                             for i, image in enumerate(images)
+    #                         ]
+    #                     }
+    #                 )
+    #
+    #     if args.push_to_hub:
+    #         save_model_card(
+    #             repo_id=repo_id,
+    #             images=images,
+    #             validation_prompt=args.validation_prompt,
+    #             base_model=args.pretrained_model_name_or_path,
+    #             dataset_name=args.dataset_name,
+    #             repo_folder=args.output_dir,
+    #             vae_path=args.pretrained_vae_model_name_or_path,
+    #         )
+    #         upload_folder(
+    #             repo_id=repo_id,
+    #             folder_path=args.output_dir,
+    #             commit_message="End of training",
+    #             ignore_patterns=["step_*", "epoch_*"],
+    #         )
 
     accelerator.end_training()
 

@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import random
+import time
 from pathlib import Path
 
 import jax
@@ -36,6 +37,7 @@ from huggingface_hub import create_repo, upload_folder
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPImageProcessor, CLIPTokenizer, FlaxCLIPTextModel, set_seed
+from jax.experimental.compilation_cache import compilation_cache as cc
 
 from diffusers import (
     FlaxAutoencoderKL,
@@ -52,6 +54,8 @@ from diffusers.utils import check_min_version
 check_min_version("0.29.0")
 
 logger = logging.getLogger(__name__)
+
+cc.initialize_cache('jax_cache')
 
 
 def parse_args():
@@ -555,6 +559,7 @@ def main():
     global_step = 0
 
     epochs = tqdm(range(args.num_train_epochs), desc="Epoch ... ", position=0)
+    ts, te = None, None
     for epoch in epochs:
         # ======================== Training ================================
 
@@ -565,6 +570,11 @@ def main():
         # train
         for batch in train_dataloader:
             batch = shard(batch)
+            if global_step == 10:
+                ts = time.time()
+            elif global_step == 90:
+                te = time.time()
+
             state, train_metric, train_rngs = p_train_step(state, text_encoder_params, vae_params, batch, train_rngs)
             train_metrics.append(train_metric)
 
@@ -578,42 +588,44 @@ def main():
 
         train_step_progress_bar.close()
         epochs.write(f"Epoch... ({epoch + 1}/{args.num_train_epochs} | Loss: {train_metric['loss']})")
+    if ts is not None and te is not None:
+        print(f'Time taken per step: {(te-ts)/90.:.2f}s')
 
     # Create the pipeline using using the trained modules and save it.
-    if jax.process_index() == 0:
-        scheduler = FlaxPNDMScheduler(
-            beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", skip_prk_steps=True
-        )
-        safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
-            "CompVis/stable-diffusion-safety-checker", from_pt=True
-        )
-        pipeline = FlaxStableDiffusionPipeline(
-            text_encoder=text_encoder,
-            vae=vae,
-            unet=unet,
-            tokenizer=tokenizer,
-            scheduler=scheduler,
-            safety_checker=safety_checker,
-            feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
-        )
-
-        pipeline.save_pretrained(
-            args.output_dir,
-            params={
-                "text_encoder": get_params_to_save(text_encoder_params),
-                "vae": get_params_to_save(vae_params),
-                "unet": get_params_to_save(state.params),
-                "safety_checker": safety_checker.params,
-            },
-        )
-
-        if args.push_to_hub:
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
+    # if jax.process_index() == 0:
+    #     scheduler = FlaxPNDMScheduler(
+    #         beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", skip_prk_steps=True
+    #     )
+    #     safety_checker = FlaxStableDiffusionSafetyChecker.from_pretrained(
+    #         "CompVis/stable-diffusion-safety-checker", from_pt=True
+    #     )
+    #     pipeline = FlaxStableDiffusionPipeline(
+    #         text_encoder=text_encoder,
+    #         vae=vae,
+    #         unet=unet,
+    #         tokenizer=tokenizer,
+    #         scheduler=scheduler,
+    #         safety_checker=safety_checker,
+    #         feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
+    #     )
+    #
+    #     pipeline.save_pretrained(
+    #         args.output_dir,
+    #         params={
+    #             "text_encoder": get_params_to_save(text_encoder_params),
+    #             "vae": get_params_to_save(vae_params),
+    #             "unet": get_params_to_save(state.params),
+    #             "safety_checker": safety_checker.params,
+    #         },
+    #     )
+    #
+    #     if args.push_to_hub:
+    #         upload_folder(
+    #             repo_id=repo_id,
+    #             folder_path=args.output_dir,
+    #             commit_message="End of training",
+    #             ignore_patterns=["step_*", "epoch_*"],
+    #         )
 
 
 if __name__ == "__main__":
