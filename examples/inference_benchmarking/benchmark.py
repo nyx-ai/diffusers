@@ -51,7 +51,8 @@ def log_time_taken(time_taken: List[float], phase: str):
     time_taken = torch.tensor(time_taken)
     mean = torch.mean(time_taken).item()
     std = torch.std(time_taken).item()
-    logger.info(f'Time taken for {phase} {mean:.2f} ± {std:.4f} s/img')
+    min_val = torch.min(time_taken).item()
+    logger.info(f'Time taken for {phase} {mean:.2f} ± {std:.4f} s/img (min: {min_val:.2f}s)')
 
 
 def run(args):
@@ -91,7 +92,7 @@ def parse_args():
     parser.add_argument('--repeats', default=3, type=int, help='Repeats')
     parser.add_argument('--dtype', default='bf16', choices=['bf16', 'fp32'], help='Torch dtype')
     parser.add_argument('--torch_compile', action='store_true', help='Enable torch.compile')
-    parser.add_argument('--torch_compile_mode', choices=['default', 'max-autotune', 'reduce-overhead'], help='Torch compile mode')
+    parser.add_argument('--torch_compile_mode', default='default', choices=['default', 'max-autotune', 'reduce-overhead'], help='Torch compile mode')
     parser.add_argument('--test_num_inference_steps', type=int, nargs='+', default=[4, 30, 50], help='What num inference steps to benchmark')
     args = parser.parse_args()
     return args
