@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 # torch._inductor.config.epilogue_fusion = False
 # torch._inductor.config.coordinate_descent_check_all_directions = True
 
+
 # Load the pipeline in full-precision and place its model components on CUDA.
 def load_model(args):
     torch_dtype = torch.bfloat16 if args.dtype == 'bf16' else torch.float32
