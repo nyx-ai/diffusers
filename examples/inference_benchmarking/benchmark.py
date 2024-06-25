@@ -22,7 +22,7 @@ def load_model(args):
     if args.model_type == 'sdxl':
         pipe = StableDiffusionXLPipeline.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", torch_dtype=torch_dtype)
     elif args.model_type == 'sd15':
-        pipe = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", torch_dtype=torch_dtype)
+        pipe = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", torch_dtype=torch_dtype, safety_checker=None, require_safety_checker=False)
     else:
         raise Exception(f'Unexpected model type {args.model_type}')
     pipe = pipe.to("cuda")
