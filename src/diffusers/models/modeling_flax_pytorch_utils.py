@@ -17,6 +17,9 @@
 import re
 
 import jax.numpy as jnp
+import torch
+import ml_dtypes
+import numpy as np
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax.random import PRNGKey
 
@@ -106,7 +109,13 @@ def rename_key_and_reshape_tensor(pt_tuple_key, pt_tensor, random_flax_state_dic
 
 def convert_pytorch_state_dict_to_flax(pt_state_dict, flax_model, init_key=42):
     # Step 1: Convert pytorch tensor to numpy
-    pt_state_dict = {k: v.numpy() for k, v in pt_state_dict.items()}
+    def _convert(torch_tensor):
+        if torch_tensor.dtype == torch.bfloat16:
+            return np.asarray(torch_tensor.cpu().float(), dtype=ml_dtypes.bfloat16)
+        else:
+            return torch_tensor.numpy()
+    # pt_state_dict = {k: v.numpy() for k, v in pt_state_dict.items()}
+    pt_state_dict = {k: _convert(v) for k, v in pt_state_dict.items()}
 
     # Step 2: Since the model is stateless, get random Flax params
     random_flax_params = flax_model.init_weights(PRNGKey(init_key))
