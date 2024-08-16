@@ -16,6 +16,8 @@
 import os
 from pickle import UnpicklingError
 from typing import Any, Dict, Union
+import json
+import glob
 
 import jax
 import jax.numpy as jnp
@@ -31,6 +33,7 @@ from huggingface_hub.utils import (
     validate_hf_hub_args,
 )
 from requests import HTTPError
+from safetensors.numpy import load_file as np_safe_load
 
 from .. import __version__, is_torch_available
 from ..utils import (
@@ -38,11 +41,16 @@ from ..utils import (
     FLAX_WEIGHTS_NAME,
     HUGGINGFACE_CO_RESOLVE_ENDPOINT,
     WEIGHTS_NAME,
+    SAFETENSORS_WEIGHTS_NAME,
+    SAFE_WEIGHTS_INDEX_NAME,
     PushToHubMixin,
     logging,
 )
+from .modeling_utils import load_state_dict
 from .modeling_flax_pytorch_utils import convert_pytorch_state_dict_to_flax
 
+DREAMLOOK_SHARDED_CHECKPOINT_FILE = 'model.safetensors.index.json'
+DREAMLOOK_CHECKPOINT_FILE = 'model.safetensors'
 
 logger = logging.get_logger(__name__)
 
@@ -331,14 +339,24 @@ class FlaxModelMixin(PushToHubMixin):
         )
         if os.path.isdir(pretrained_path_with_subfolder):
             if from_pt:
+                if os.path.isfile(os.path.join(pretrained_path_with_subfolder, WEIGHTS_NAME)):
+                    model_file = os.path.join(pretrained_path_with_subfolder, WEIGHTS_NAME)
+                elif os.path.isfile(os.path.join(pretrained_path_with_subfolder, SAFE_WEIGHTS_INDEX_NAME)):
+                    model_file = os.path.join(pretrained_path_with_subfolder, SAFE_WEIGHTS_INDEX_NAME)
+                elif os.path.isfile(os.path.join(pretrained_path_with_subfolder, SAFETENSORS_WEIGHTS_NAME)):
+                    model_file = os.path.join(pretrained_path_with_subfolder, SAFETENSORS_WEIGHTS_NAME)
                 if not os.path.isfile(os.path.join(pretrained_path_with_subfolder, WEIGHTS_NAME)):
                     raise EnvironmentError(
                         f"Error no file named {WEIGHTS_NAME} found in directory {pretrained_path_with_subfolder} "
                     )
                 model_file = os.path.join(pretrained_path_with_subfolder, WEIGHTS_NAME)
+            elif os.path.isfile(os.path.join(pretrained_path_with_subfolder, DREAMLOOK_CHECKPOINT_FILE)):
+                model_file = os.path.join(pretrained_path_with_subfolder, DREAMLOOK_CHECKPOINT_FILE)
             elif os.path.isfile(os.path.join(pretrained_path_with_subfolder, FLAX_WEIGHTS_NAME)):
                 # Load from a Flax checkpoint
                 model_file = os.path.join(pretrained_path_with_subfolder, FLAX_WEIGHTS_NAME)
+            elif os.path.isfile(os.path.join(pretrained_path_with_subfolder, DREAMLOOK_SHARDED_CHECKPOINT_FILE)):
+                model_file = os.path.join(pretrained_path_with_subfolder, DREAMLOOK_SHARDED_CHECKPOINT_FILE)
             # Check if pytorch weights exist instead
             elif os.path.isfile(os.path.join(pretrained_path_with_subfolder, WEIGHTS_NAME)):
                 raise EnvironmentError(
@@ -351,101 +369,133 @@ class FlaxModelMixin(PushToHubMixin):
                     f"{pretrained_path_with_subfolder}."
                 )
         else:
-            try:
-                model_file = hf_hub_download(
-                    pretrained_model_name_or_path,
-                    filename=FLAX_WEIGHTS_NAME if not from_pt else WEIGHTS_NAME,
-                    cache_dir=cache_dir,
-                    force_download=force_download,
-                    proxies=proxies,
-                    local_files_only=local_files_only,
-                    token=token,
-                    user_agent=user_agent,
-                    subfolder=subfolder,
-                    revision=revision,
-                )
-
-            except RepositoryNotFoundError:
-                raise EnvironmentError(
-                    f"{pretrained_model_name_or_path} is not a local folder and is not a valid model identifier "
-                    "listed on 'https://huggingface.co/models'\nIf this is a private repository, make sure to pass a "
-                    "token having permission to this repo with `token` or log in with `huggingface-cli "
-                    "login`."
-                )
-            except RevisionNotFoundError:
-                raise EnvironmentError(
-                    f"{revision} is not a valid git identifier (branch name, tag name or commit id) that exists for "
-                    "this model name. Check the model page at "
-                    f"'https://huggingface.co/{pretrained_model_name_or_path}' for available revisions."
-                )
-            except EntryNotFoundError:
-                raise EnvironmentError(
-                    f"{pretrained_model_name_or_path} does not appear to have a file named {FLAX_WEIGHTS_NAME}."
-                )
-            except HTTPError as err:
-                raise EnvironmentError(
-                    f"There was a specific connection error when trying to load {pretrained_model_name_or_path}:\n"
-                    f"{err}"
-                )
-            except ValueError:
-                raise EnvironmentError(
-                    f"We couldn't connect to '{HUGGINGFACE_CO_RESOLVE_ENDPOINT}' to load this model, couldn't find it"
-                    f" in the cached files and it looks like {pretrained_model_name_or_path} is not the path to a"
-                    f" directory containing a file named {FLAX_WEIGHTS_NAME} or {WEIGHTS_NAME}.\nCheckout your"
-                    " internet connection or see how to run the library in offline mode at"
-                    " 'https://huggingface.co/docs/transformers/installation#offline-mode'."
-                )
-            except EnvironmentError:
-                raise EnvironmentError(
-                    f"Can't load the model for '{pretrained_model_name_or_path}'. If you were trying to load it from "
-                    "'https://huggingface.co/models', make sure you don't have a local directory with the same name. "
-                    f"Otherwise, make sure '{pretrained_model_name_or_path}' is the correct path to a directory "
-                    f"containing a file named {FLAX_WEIGHTS_NAME} or {WEIGHTS_NAME}."
-                )
+            possible_filenames = [FLAX_WEIGHTS_NAME, WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME, SAFETENSORS_WEIGHTS_NAME]
+            for filename in possible_filenames:
+                try:
+                    model_file = hf_hub_download(
+                        pretrained_model_name_or_path,
+                        filename=filename,
+                        cache_dir=cache_dir,
+                        force_download=force_download,
+                        proxies=proxies,
+                        local_files_only=local_files_only,
+                        token=token,
+                        user_agent=user_agent,
+                        subfolder=subfolder,
+                        revision=revision,
+                    )
+                except Exception as e:
+                    continue
+                else:
+                    break
+            else:
+                raise FileNotFoundError(f'Could not find any of the possible filename {possible_filenames} at location {pretrained_model_name_or_path}')
+            # try:
+            #     model_file = hf_hub_download(
+            #         pretrained_model_name_or_path,
+            #         # filename=FLAX_WEIGHTS_NAME if not from_pt else WEIGHTS_NAME,
+            #         filename=FLAX_WEIGHTS_NAME if not from_pt else SAFE_WEIGHTS_INDEX_NAME,
+            #         cache_dir=cache_dir,
+            #         force_download=force_download,
+            #         proxies=proxies,
+            #         local_files_only=local_files_only,
+            #         token=token,
+            #         user_agent=user_agent,
+            #         subfolder=subfolder,
+            #         revision=revision,
+            #     )
+            #
+            # except RepositoryNotFoundError:
+            #     raise EnvironmentError(
+            #         f"{pretrained_model_name_or_path} is not a local folder and is not a valid model identifier "
+            #         "listed on 'https://huggingface.co/models'\nIf this is a private repository, make sure to pass a "
+            #         "token having permission to this repo with `token` or log in with `huggingface-cli "
+            #         "login`."
+            #     )
+            # except RevisionNotFoundError:
+            #     raise EnvironmentError(
+            #         f"{revision} is not a valid git identifier (branch name, tag name or commit id) that exists for "
+            #         "this model name. Check the model page at "
+            #         f"'https://huggingface.co/{pretrained_model_name_or_path}' for available revisions."
+            #     )
+            # except EntryNotFoundError:
+            #     raise EnvironmentError(
+            #         f"{pretrained_model_name_or_path} does not appear to have a file named {FLAX_WEIGHTS_NAME}."
+            #     )
+            # except HTTPError as err:
+            #     raise EnvironmentError(
+            #         f"There was a specific connection error when trying to load {pretrained_model_name_or_path}:\n"
+            #         f"{err}"
+            #     )
+            # except ValueError:
+            #     raise EnvironmentError(
+            #         f"We couldn't connect to '{HUGGINGFACE_CO_RESOLVE_ENDPOINT}' to load this model, couldn't find it"
+            #         f" in the cached files and it looks like {pretrained_model_name_or_path} is not the path to a"
+            #         f" directory containing a file named {FLAX_WEIGHTS_NAME} or {WEIGHTS_NAME}.\nCheckout your"
+            #         " internet connection or see how to run the library in offline mode at"
+            #         " 'https://huggingface.co/docs/transformers/installation#offline-mode'."
+            #     )
+            # except EnvironmentError:
+            #     raise EnvironmentError(
+            #         f"Can't load the model for '{pretrained_model_name_or_path}'. If you were trying to load it from "
+            #         "'https://huggingface.co/models', make sure you don't have a local directory with the same name. "
+            #         f"Otherwise, make sure '{pretrained_model_name_or_path}' is the correct path to a directory "
+            #         f"containing a file named {FLAX_WEIGHTS_NAME} or {WEIGHTS_NAME}."
+            #     )
 
         if from_pt:
-            if is_torch_available():
-                from .modeling_utils import load_state_dict
-            else:
-                raise EnvironmentError(
-                    "Can't load the model in PyTorch format because PyTorch is not installed. "
-                    "Please, install PyTorch or use native Flax weights."
-                )
-
             # Step 1: Get the pytorch file
-            pytorch_model_file = load_state_dict(model_file)
+            if model_file.endswith(SAFE_WEIGHTS_INDEX_NAME):
+                index = json.load(open(model_file))
+                pytorch_model_file = {}
+                for filename in set(index['weight_map'].values()):
+                    sd = load_state_dict(os.path.join(os.path.dirname(model_file), filename))
+                    pytorch_model_file = {**pytorch_model_file, **sd}
+            else:
+                pytorch_model_file = load_state_dict(model_file)
 
             # Step 2: Convert the weights
             state = convert_pytorch_state_dict_to_flax(pytorch_model_file, model)
+            state = flatten_dict(state, sep='.')
         else:
-            try:
-                with open(model_file, "rb") as state_f:
-                    state = from_bytes(cls, state_f.read())
-            except (UnpicklingError, msgpack.exceptions.ExtraData) as e:
+            if model_file.endswith(FLAX_WEIGHTS_NAME):
                 try:
-                    with open(model_file) as f:
-                        if f.read().startswith("version"):
-                            raise OSError(
-                                "You seem to have cloned a repository without having git-lfs installed. Please"
-                                " install git-lfs and run `git lfs install` followed by `git lfs pull` in the"
-                                " folder you cloned."
-                            )
-                        else:
-                            raise ValueError from e
-                except (UnicodeDecodeError, ValueError):
-                    raise EnvironmentError(f"Unable to convert {model_file} to Flax deserializable object. ")
-            # make sure all arrays are stored as jnp.ndarray
-            # NOTE: This is to prevent a bug this will be fixed in Flax >= v0.3.4:
-            # https://github.com/google/flax/issues/1261
-        state = jax.tree_util.tree_map(lambda x: jax.device_put(x, jax.local_devices(backend="cpu")[0]), state)
+                    with open(model_file, "rb") as state_f:
+                        state = from_bytes(cls, state_f.read())
+                except (UnpicklingError, msgpack.exceptions.ExtraData) as e:
+                    try:
+                        with open(model_file) as f:
+                            if f.read().startswith("version"):
+                                raise OSError(
+                                    "You seem to have cloned a repository without having git-lfs installed. Please"
+                                    " install git-lfs and run `git lfs install` followed by `git lfs pull` in the"
+                                    " folder you cloned."
+                                )
+                            else:
+                                raise ValueError from e
+                    except (UnicodeDecodeError, ValueError):
+                        raise EnvironmentError(f"Unable to convert {model_file} to Flax deserializable object. ")
+                # make sure all arrays are stored as jnp.ndarray
+                # NOTE: This is to prevent a bug this will be fixed in Flax >= v0.3.4:
+                # https://github.com/google/flax/issues/1261
+                state = jax.tree_util.tree_map(lambda x: jax.device_put(x, jax.local_devices(backend="cpu")[0]), state)
 
-        # flatten dicts
-        state = flatten_dict(state)
+                # flatten dicts
+                state = flatten_dict(state, sep='.')
+            elif model_file.endswith(DREAMLOOK_SHARDED_CHECKPOINT_FILE):
+                state = {}
+                for f_name in glob.glob(os.path.join(os.path.dirname(model_file), '*.safetensors')):
+                    shard = np_safe_load(f_name)
+                    state.update(shard)
+            elif model_file.endswith(DREAMLOOK_CHECKPOINT_FILE):
+                state = np_safe_load(model_file)
+            else:
+                raise NotImplementedError(f'Loading mechanism for file {model_file} is not yet supported.')
 
         params_shape_tree = jax.eval_shape(model.init_weights, rng=jax.random.PRNGKey(0))
-        required_params = set(flatten_dict(unfreeze(params_shape_tree)).keys())
+        required_params = set(flatten_dict(unfreeze(params_shape_tree), sep='.').keys())
 
-        shape_state = flatten_dict(unfreeze(params_shape_tree))
+        shape_state = flatten_dict(unfreeze(params_shape_tree), sep='.')
 
         missing_keys = required_params - set(state.keys())
         unexpected_keys = set(state.keys()) - required_params
@@ -493,7 +543,7 @@ class FlaxModelMixin(PushToHubMixin):
                 " training."
             )
 
-        return model, unflatten_dict(state)
+        return model, unflatten_dict(state, sep='.')
 
     def save_pretrained(
         self,
